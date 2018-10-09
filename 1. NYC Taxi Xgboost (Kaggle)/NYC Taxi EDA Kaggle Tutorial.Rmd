@@ -1,16 +1,16 @@
 ---
 title: 'NYC Taxi EDA - Update: The fast & the curious'
 output:
+  html_document:
+    code_folding: hide
+    fig_height: 4.5
+    fig_width: 7
+    highlight: tango
+    number_sections: yes
+    theme: cosmo
+    toc: yes
   word_document:
     toc: yes
-  # html_document:
-  #   code_folding: hide
-  #   fig_height: 4.5
-  #   fig_width: 7
-  #   highlight: tango
-  #   number_sections: yes
-  #   theme: cosmo
-  #   toc: yes
 date: "`r Sys.Date()`"
 ---
 ```{r setup, include=FALSE, echo=FALSE}
