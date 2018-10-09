@@ -1,15 +1,17 @@
 ---
 title: 'NYC Taxi EDA - Update: The fast & the curious'
-date: '`r Sys.Date()`'
 output:
-  html_document:
-    number_sections: true
-    toc: true
-    fig_width: 7
-    fig_height: 4.5
-    theme: cosmo
-    highlight: tango
-    code_folding: hide
+  word_document:
+    toc: yes
+  # html_document:
+  #   code_folding: hide
+  #   fig_height: 4.5
+  #   fig_width: 7
+  #   highlight: tango
+  #   number_sections: yes
+  #   theme: cosmo
+  #   toc: yes
+date: "`r Sys.Date()`"
 ---
 ```{r setup, include=FALSE, echo=FALSE}
 knitr::opts_chunk$set(echo=TRUE, error=FALSE)
@@ -2066,6 +2068,146 @@ valid <- train[-trainIndex,]
 ```
 
 Finall,y we are performing careful cleaniing step on our *train* sample only. By removing observations from the training data, we always run the risk of overfitting our model to a more idealized version of reality. In particular for the current data set, where lots of values don't make obvious sense, this idelized model might not generalize well to unseen data, which could have similar "quirks". For this reason, we are keeping the validation sample unchanged, so that any noticeable deviations between **train** and **valid** model score can alert us to verfitting. 
+
+Why clean at all? Well, in my opinion obvious outliers should be removed to make the model robust. It's true that these outliers might also exist in the *test* data, but if there is a way to predict them then this suggests that they might not be outliers after all. And if we can't predict them there's no way to take them into account anyway. Lastly, the answer also depends on the *goal* of your analysis (and your evaluation metric) which might not always aim at fitting a given *test* set as good as possible but sometimes have a more pragmatic target that allows you to ignore extreme values.
+
+Here, we only remove the few *trip\_duration* that are longer than a day and the couple of data points far, far away from NYC:
+```{r}
+valid <- valid %>% 
+  select_(.dots=str_c("-",c(clean_cols)))
+
+train <- train %>% 
+  filter(trip_duration<24*3600,
+         jfk_dist_pick<3e5 & jfk_dist_drop<3e5) %>% 
+  select_(.dots=str_c("-",c(clean_cols)))
+```
+
+## XGBoost parameters and fitting
+
+For the model fitting, we will use everybody's favorite *XGBosst-extreme Gradient Boosting*. This is a decision-tree gradient boosting algorithm with a high degree of popularity here on Kaggle.In this kernel we will implement a fairly straight-forward fitting strategy. Feel free to optimise the parameters and get some inspiration from [other kernels](https://www.kaggle.com/gaborfodor/from-eda-to-the-top-lb-0-367/) that are more focussed on model fitting. Also try out other classifiers, such as [Megan's baseline Random Forest](https://www.kaggle.com/mrisdal/last-place-laura-benchmark/) to see how they treat our features.
+
+A few brief words about *gradient boosting*, as far as I understand it: Boosting is what we call the step-by-step improvement of a weak learner (like a relatively shallow decision tree of *max\_depth* levels) by successively applying it to the results of the previous learning step (for *nrounds* times in total). *Gradient Boosting* focusses on minimising the Loss Function (according to our evaluation metric) by training the algorithm on the gradient of this function. The method of *Gradient Decent* iteratively moves into the direction of the greatest decent (i.e. most negative first derivative) of the loss function. The step sizes can vary from iteration to iteration but has a multiplicative *shrinkage factor eta in (0,1]* associated with it for additional tuning. Smaller values of eta result in a slower decent and require higher *nrounds*.
+
+In order for *XGBoost* to properly ingest our data samples we need to re-format them slightly:
+```{r}
+# Convert to XGB matrix
+foo <- train %>% select(-trip_duration)
+bar <- valid %>% select(-trip_duration)
+
+dtrain <- xgb.DMatrix(as.matrix(foo),label=train$trip_duration)
+dvalid <- xgb.DMatrix(as.matrix(bar),label=valid$trip_duration)
+dtest <- xgb.DMatrix(as.matrix(test))
+```
+
+Now we define the meta-parameters that govern how *XGBoost* operates. See [here](https://github.com/dmlc/xgboost/blob/master/doc/parameter.md) for more details. The *watchlist* parameter tells the algorithm to keep an eye on both the *training* and *validation* sample metrics. Those parameters are not optimised for performance, so feel free to play with them:
+
+```{r}
+xgb_params <- list(colsample_bytree=0.7,#variables per tree
+                  subsample=0.7,#data subset per tree
+                  booster="gbtree",
+                  max_depth=5, #tree levels
+                  eta=0.3, #shrinkage
+                  eval_metric="rmse",
+                  objective="reg:linear",
+                  seed=4321
+                  )
+
+watchlist <- list(train=dtrain, valid=dvalid)
+```
+
+And here we *train* our classifier, i.e. fit it to the *training* data. To ensure reproducability we set an R seed here. To make this model run in the kernel environment, given our extensive EDA run time, we will restrict the learning to 60 sample rounds. 
+
+```{r}
+set.seed(4321)
+gb_dt <- xgb.train(params=xgb_params,
+                   data=dtrain,
+                   print_every_n=5,
+                   watchlist=watchlist,
+                   nrounds=60)
+```
+
+After the fitting we are running a **5-fold cross-validation (CV)** to estimate our model's performance. Also this stage would exceed the Kaggle run-time limit for a larger number of rounds, therefore I'm limiting it here to 15 sample rounds to demonstrate the principle. You should use at least a few 100 in your analysis, depending on your XGBoost parameters. The early-stopping parameter will make sure that the CV fitting is stopped once the model can't be improved through additional steps.
+
+```{r}
+xgb_cv <- xgb.cv(xgb_params, dtrain, early_stopping_rounds=10, nfold=5, nrounds=15)
+```
+
+## Feature importance
+After training we will check which features are the most important for our model. This can provide the starting point for an iterative process where we identify, step by step, the significant features for a model. Here we will simply visualise these features:
+
+```{r fig.align = 'default', warning = FALSE, fig.cap ="Fig. 34", out.width="100%"}
+
+imp_matrix <- as.tibble(xgb.importance(feature_names = colnames(train %>% select(-trip_duration)),model=gb_dt))
+
+imp_matrix %>% 
+  ggplot(aes(reorder(Feature,Gain,FUN=max),Gain,fill=Feature))+
+  geom_col()+
+  coord_flip()+
+  theme(legend.position = "none")+
+  labs(x="Features",y="Importance")
+```
+
+We find that, unsurprisingly, the OSRM features like *total\_distance* and *total_travel_time* are by far the most important predictors for the *trip\_duration*. Beyond that, our engineered features like *wday* or *bearing* are not doing bad either.
+
+
+## Prediction and submission file
+Once we are reasonably happy with our CV score we use the corresponding model to make a prediction for the test data, write the submission file, and submit it to the Kaggle leaderboard. This gives a performance score based on an *independent* data set. For this very reason, it is advisable to aim to keep the number of leaderboard submission low. Otherwise you run the risk to have your model influenced too much by this public leaderboard data which will result in overfitting. It's better to trust your local CV. Just ask anyone who has just completed the Mercedes challenge ;-)
+
+Practically, this pre-ulimate code block will apply the *XGBoost* model to the testing data and write a submission file according to the competition specification. You will then find the file `submit.csv` in the "Output" tab of the Kaggle kernel or, if you have run the script locally, in the source directory.
+
+```{r eval=FALSE}
+
+test_preds <- predict(gb_dt,dtest)
+pred <- test_id %>%
+  mutate(trip_duration = exp(test_preds) - 1)
+
+pred %>% write_csv('submit.csv')
+```
+
+All that's left to do is to double-check this submission file to make sure that we are not wasting a (potentially) valuable submission with a mal-formatted output file. We are comparing its shape and content with the *sample submission file* that we read in at the very beginning, and also plot the distribution of the predicted values compared to the training values for an approximate comparison:
+
+```{r eval=FALSE}
+#fig.align = 'default', warning = FALSE, fig.cap ="Fig. 35", fig.height=3, out.width="100%"
+identical(dim(sample_submit),dim(pred))
+glimpse(sample_submit)
+glimpse(pred)
+bind_cols(sample_submit, pred) %>% head(5)
+
+foo <- train %>%
+  select(trip_duration) %>%
+  mutate(dset = "train",
+         trip_duration = exp(trip_duration) - 1)
+bar <- pred %>%
+  mutate(dset = "predict")
+
+bind_rows(foo, bar) %>%
+  ggplot(aes(trip_duration, fill = dset)) +
+  geom_density(alpha = 0.5) +
+  scale_x_log10()
+```
+
+
+
+Prediction file format and *trip\_duration* range successfully verified.
+
+In its present state, this model will give you a score of 0.410 on the public leaderboard which, at the time of writing, will put you in the top 40% of submissions. Clearly this is just a starting point for you to explore and improve the modelling process. Here are a few suggestions:
+
+- First of all, run the training and cross-validation for a larger number of rounds. This alone will immediately improve your score.
+- Add further features to the model and explore the impact of more or less cleaning.
+- Try out different XGBoost parameters and see how they affect the CV score.
+The rest is up to you. I hope that this extensive EDA gave you useful insights into the data as well as ideas to get you started with your own analysis. I wish you the best of success.
+
+---
+
+
+
+Many thanks to all of you for reading, commenting on, and upvoting this kernel! This competition was an awesome experience for me and I hope you enjoyed it as well.
+
+
+
+See you at the next challenge! :-)
+
+
 
 
 
