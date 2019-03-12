@@ -4,7 +4,15 @@
 ### 1: NYC Taxi Distance Prediction by XGBoost(-2018/10/01)  
 https://www.kaggle.com/headsortails/nyc-taxi-eda-update-the-fast-the-curious/notebook  
 
-### 2: 
+### 2: Recruit Customer Number prediction 
+https://www.kaggle.com/headsortails/be-my-guest-recruit-restaurant-eda/data  
+
+#### Forecasting methods  
+The kernel sets out by borrowing heavily from the explanations and methods outlined in my [WikiTrafficForecast kernel](https://www.kaggle.com/headsortails/wiki-traffic-forecast-exploration-wtf-eda).  
+
+#### ARIMA Example  
+For a more detailed exploration of ARIMA models take a look at [this Kernel](https://www.kaggle.com/timolee/feeling-hungry-a-beginner-s-guide-to-arima-models) by [TimLee](https://www.kaggle.com/timolee).  
+
 
 
 ## Tutorial
