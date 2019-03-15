@@ -1527,6 +1527,474 @@ Here we will be using the `auto.arima` tool which estimates the necessary ARIMA 
 
 We use the first *air\_store\_id* ("air_ba937bf13d40fb24") as an example.
 
+```{r}
+air_id = "air_ba937bf13d40fb24"
+```
+
+In order to test our prediction, we will forecast for an identical time frame as we are ultimately tasked to predict (Apr 23th - May 31st). Here we automatically extract these 39 days from the length of the *test* prediction range and define it as our "prediction length".
+
+```{r}
+pred_len <- test %>% 
+  separate(id, c("air", "store_id", "date"), sep="_") %>% 
+  distinct(date) %>% 
+  nrow()
+```
+
+We choose to predict for the last 39 days of our *training* sample. This might not be Here we compute the upper end of our *training* dates and subtract our "prediction length" from this value to define the start of our validation sample on Mar 14th. We also create a data set of all *visit\_dates* in preparation for many time series having gaps.
+
+```{r}
+max_date <- max(air_visits$visit_date)
+split_date <- max_date - pred_len
+all_visits <- tibble(visit_date = seq(min(air_visits$visit_date), max(air_visits$visit_date), 1))
+```
+
+Next, we extract the time series for the specific *air\_store\_id*. We transform the *visitors* counts by `log1p` and join the data set of all *visit\_dates*. This gives us a number of `NA` which we fill in with the overall median. The median might not be the best choice here, but it's a sensible starting point. Most time series prediction tools require a sequential time series without gaps; which is what we create in this step.
+
+```{r}
+foo <- air_visits %>% 
+  filter(air_store_id == air_id)
+
+visits <- foo %>%
+  right_join(all_visits, by = "visit_date") %>%
+  mutate(visitor = log1p(visitors)) %>%
+  replace_na(list(visitors = median(log1p(foo$visitors)))) %>%
+  rownames_to_column()
+```
+
+Using this new time series, we now split the data into *training* and *validation* sets.
+
+```{r}
+visits_train <- visits %>% filter(visit_date <= split_date)
+visits_valid <- visits %>% filter(visit_date > split_date)
+```
+
+Now comes the fitting part. As said before, we use the `ts` function to create a time series object and the `tsclean` tool to remove outliers. We also add the weekly frequency. The `stepwise` and `approximation` parameter settings mean that the tool performs a more thorough and precise search over all model parameters. This increases the computing time, but for our small data set this doesn't matter much.
+
+```{r}
+arima.fit <- auto.arima(
+  tsclean(ts(visits_train$visitors, frequency = 7)),
+  stepwise = FALSE, approximation = FALSE
+)
+```
+
+Using the fitted ARIMA model we will `forecast` for our "prediction length". We include confidence intervals.
+
+```{r}
+arima_visits <- arima.fit %>% 
+  forecast(h=pred_len, level=c(50,95))
+```
+
+Finally, we plot our prediction. The `autoplot` function of the `ggplot2` package creates plots according to the properties of a particular data type; here a time series object. The predicted *visitor* counts are shown in dark blue, with the lighter blues indicating the confidence ranges. We also add the real validation counts in grey:
+
+```{r split=FALSE, fig.align = 'default', warning = FALSE, fig.cap ="Fig. 31", out.width="100%"}
+
+arima_visits %>% 
+  autoplot()+
+  geom_line(aes(as.integer(rowname)/7,visitors),data = visits_valid, color="grey40")+
+  labs(x = "Time [weeks]", y = "log1p visitors vs auto.arima predictions")
+```
+
+We find that the first days of the forecast fit quite well, but then our prediction is not able to capture the larger spikes. Still, it's a useful starting point to compare other methods to.
+
+Now we turn this procedure into a function, including the plotting part.
+
+```{r}
+plot_auto_arima_air_id <- function(air_id){
+
+  pred_len <- test %>%
+    separate(id, c("air", "store_id", "date"), sep = "_") %>%
+    distinct(date) %>%
+    nrow()
+
+  max_date <- max(air_visits$visit_date)
+  split_date <- max_date - pred_len
+  all_visits <- tibble(visit_date = seq(min(air_visits$visit_date), max(air_visits$visit_date), 1))
+
+  foo <- air_visits %>%
+    filter(air_store_id == air_id)
+
+  visits <- foo %>%
+    right_join(all_visits, by = "visit_date") %>%
+    mutate(visitors = log1p(visitors)) %>%
+    replace_na(list(visitors = median(log1p(foo$visitors)))) %>%
+    rownames_to_column()
+
+  visits_train <- visits %>% filter(visit_date <= split_date)
+  visits_valid <- visits %>% filter(visit_date > split_date)
+
+  arima.fit <- auto.arima(tsclean(ts(visits_train$visitors, frequency = 7)),
+                          stepwise = FALSE, approximation = FALSE)
+
+  arima_visits <- arima.fit %>% forecast(h = pred_len, level = c(50,95))
+
+  arima_visits %>%
+    autoplot +
+    geom_line(aes(as.integer(rowname)/7, visitors), data = visits_valid, color = "grey40") +
+    labs(x = "Time [weeks]", y = "log1p visitors vs forecast")
+}
+
+```
+
+And we apply this function to a few time series', including two of the *slope* outliers from the previous section:
+
+```{r fig.align = 'default', warning = FALSE, fig.cap ="Fig. 31", out.width="100%"}
+
+p1 <- plot_auto_arima_air_id("air_f3f9824b7d70c3cf")
+p2 <- plot_auto_arima_air_id("air_8e4360a64dbd4c50")
+p3 <- plot_auto_arima_air_id("air_1c0b150f9e696a5f")
+p4 <- plot_auto_arima_air_id("air_900d755ebd2f7bbd")
+
+layout <- matrix(c(1,2,3,4),2,2,byrow=TRUE)
+multiplot(p1, p2, p3, p4, layout=layout)
+```
+
+We find:
+
+- The two time series' in the upper panels are reasonable complete, but we see that the long gaps (and our median filling) lead to problems in the predictions in the upper left panel where we loose the weekly periodicity. The upper right panel retains this periodicity and the predictions for the first days are relatively decent, but then we quickly under-predict the amplitude of the variations.
+
+- The lower panels include two of the outliers from our time-series parameter space above; and here we see cases where things go really wrong. These kind of peculiar time series could lead to a bad performance for any otherwise decent forecasting algorithm if they contain a large enough fraction of visits in the test data set.
+
+Overall, the results are not great, but given that it's a fully automatic forecast (assuming only weekly periodicities) the `auto.arima` tool gives us a first baseline to compare other methods to.
+
+
+For a more detailed exploration of ARIMA models take a look at [this Kernel](https://www.kaggle.com/timolee/feeling-hungry-a-beginner-s-guide-to-arima-models) by [TimLee](https://www.kaggle.com/timolee).
+
+## Prophet
+
+The [prophet](https://facebookincubator.github.io/prophet/) forecasting tool is an open-source software developed by [Facebook](https://research.fb.com/prophet-forecasting-at-scale/). It is available for both *R* and Python.
+
+Prophet utilises an additive regression model which decomposes a time series into (i) a (piecewise) linear/logistic trend, (ii) a yearly seasonal component, (iii) a weekly seasonal component, and (iv) an optional list of important days (such as holidays, special events, ...). It claims to be "robust to missing data, shifts in the trend, and large outliers". Especially the missing data functionality could be useful in this competition.
+
+Let's again explore the tool step by step. We will build on our work in the ARIMA section and won't repeat any explanations that can be found there.
+
+We will again create a *training* and *validation* set for the same periods as above (i.e before/after Mar 14th). The only differences to our ARIMA approach are that: 
+
+- We don't need to replace `NA` values because prophet knows how to handle those.
+- Prophet expects a data frame with two columns: *ds* for the dates and *y* for the time series variable.
+
+```{r message=FALSE, error=FALSE}
+air_id = "air_ba937bf13d40fb24"
+
+pred_len <- test %>% 
+  separate(id, c("air","store_id","date"), sep="_") %>% 
+  distinct(date) %>% 
+  nrow()
+
+max_date <- max(air_visits$visit_date)
+splot_date <- max_date - pred_len
+all_visits <- tibble(
+  visit_date = seq(min(air_visits$visit_date), max(air_visits$visit_date), 1))
+
+foo <- air_visits %>% 
+  filter(air_store_id == air_id)
+
+visits <- foo %>%
+  right_join(all_visits, by = "visit_date") %>%
+  mutate(visitors = log1p(visitors)) %>%
+  rownames_to_column() %>%
+  select(y = visitors,
+         ds = visit_date)
+
+visits_train <- visits %>% filter(ds <= split_date)
+visits_valid <- visits %>% filter(ds > split_date)
+```
+
+Here we fit the prophet model and make the forecast:
+
+- the parameter *changepoint.prior.scale* adjusts the trend flexibility. Increasing this parameter makes the fit more flexible, but also increases the forecast uncertainties and makes it more likely to overfit to noise. The changepoints in the data are automatically detected unless being specified by hand using the *changepoints* argument (which we don't do here).
+
+- the parameter *yearly.seasonality* has to be enabled/disabled explicitely and allows prophet to notice large-scale cycles. We have barely a year of data here, which is definitely insufficient to find yearly cycles and probably not enough to identify variations on the time scales of months. Feel free to test the performance of this parameter. 
+
+```{r}
+proph <- prophet(visits_train,
+                 changepoint.prior.scale = 0.5,
+                 yearly.seasonality = FALSE)
+
+future <- make_future_dataframe(proph, periods = pred_len)
+fcast <- predict(proph, future)
+```
+
+This is the standard prophet forecast plot:
+
+```{r fig.align = 'default', warning = FALSE, fig.cap ="Fig. 32", out.width="100%"}
+plot(proph, fcast)
+```
+
+The observed data are plotted as black points and the fitted model, plus forecast, as a blue line. In light blue we see the corresponding uncertainties.
+
+Prohpet offers a decomposition plot, where we can inspect the additive components of the model: trend, yearly seasonality, and weekly cycles:
+
+```{r fig.align = 'default', warning = FALSE, fig.cap ="Fig. 33", out.width="100%"}
+
+prophet_plot_components(proph, fcast)
+```
+
+We find:
+
+- Prophet detects a weekly variation pattern which is similar to what we had found before, in that Fri/Sat are more popular than the rest of the week. The difference, however, is that here Sun has a very low average *visitor* count. This might be be due to the properties of this particular restaurant, a "Dining Bar" in "Tokyo". In Fig. 23 we see that "Dining Bars" in general are not as busy on Sundays; although not to such a large extent as we see in this graph. The difference in *visitors* on Sat vs Sun might be an interesting feature of an eventual model.
+
+- The long-term trend is different from the average behaviours displayed in Fig. 11, which were more likely to rise toward the end of 2016. Here we see a peak in mid 2016. (Thanks to [GAVOILLEGuillaume](https://www.kaggle.com/guillaumegavoille) in the comments for spotting my earlier mistakes in this description!)
+
+- Note, that this is one specific time series. I've checked other time series as well and many of them showed the expected Fri/Sat/Sun vs Mon-Thu variations along with a long-term peak around Dec 2017. Feel free to fork this Kernel and check for yourself.
+
+So: this is a good start, but we will of course use our trusted `ggplot2` to give us more control over the plotting parameters:
+
+```{r fig.align = 'default', warning = FALSE, fig.cap ="Fig. 34", out.width="100%"}
+
+fcast %>%
+  as.tibble() %>%
+  mutate(ds = date(ds)) %>%
+  ggplot(aes(ds, yhat)) + 
+  geom_ribbon(aes(x = ds, ymin = yhat_lower, ymax = yhat_upper), fill = "light blue") +
+  geom_line(colour = "blue") +
+  geom_line(data = visits_train, aes(ds, y), colour = "black") +
+  geom_line(data = visits_valid, aes(ds, y), colour = "grey50")
+
+```
+
+That doesn't look too bad. We plot our training visitor counts in black, the validation set in grey, and the forecast plus uncertainties in blue and light blue, again.
+
+Let's turn this into another function:
+
+```{r}
+plot_prophet_air_id <- function(air_id){
+
+  pred_len <- test %>%
+    separate(id, c("air", "store_id", "date"), sep = "_") %>%
+    distinct(date) %>%
+    nrow()
+
+  max_date <- max(air_visits$visit_date)
+  split_date <- max_date - pred_len
+  all_visits <- tibble(visit_date = seq(min(air_visits$visit_date), max(air_visits$visit_date), 1))
+
+  foo <- air_visits %>%
+    filter(air_store_id == air_id)
+  
+  visits <- foo %>%
+    right_join(all_visits, by = "visit_date") %>%
+    mutate(visitors = log1p(visitors)) %>%
+    rownames_to_column() %>%
+    select(y = visitors,
+          ds = visit_date)
+
+  visits_train <- visits %>% filter(ds <= split_date)
+  visits_valid <- visits %>% filter(ds > split_date)
+
+  proph <- prophet(visits_train, changepoint.prior.scale=0.5, yearly.seasonality=FALSE)
+  future <- make_future_dataframe(proph, periods = pred_len)
+  fcast <- predict(proph, future)
+
+  p <- fcast %>%
+    as.tibble() %>%
+    mutate(ds = date(ds)) %>%
+    ggplot(aes(ds, yhat)) +
+    geom_ribbon(aes(x = ds, ymin = yhat_lower, ymax = yhat_upper), fill = "light blue") +
+    geom_line(colour = "blue") +
+    geom_line(data = visits_train, aes(ds, y), colour = "black") +
+    geom_line(data = visits_valid, aes(ds, y), colour = "grey50") +
+    labs(title = str_c("Prophet for ", air_id))
+
+  return(p)
+}  
+```
+
+And then we forecast and plot the same time series as above (except for "air_900d755ebd2f7bbd", which didn't have enough data points for prophet and had to be replaced by "air_820d1919cbecaa0a"):
+
+```{r results="hide", fig.align = 'default', warning = FALSE, fig.cap ="Fig. 35", out.width="100%"}
+
+p1 <- plot_prophet_air_id("air_f3f9824b7d70c3cf")
+p2 <- plot_prophet_air_id("air_8e4360a64dbd4c50")
+p3 <- plot_prophet_air_id("air_1c0b150f9e696a5f")
+p4 <- plot_prophet_air_id("air_820d1919cbecaa0a")
+
+layout <- matrix(c(1,2,3,4),2,2,byrow=TRUE)
+multiplot(p1, p2, p3, p4, layout=layout)
+```
+
+That looks not bad either. Looks like we're overestimating the trend component, which could probably use less flexibility, for at least three of these. The forth time series has too little data for prophet to be able to do much. Here we could discard the trend component completely or simply take the median.
+
+Remember that prophet also gives us the possibility to include *holidays* and other special events in our forecast. For our task, this could be very useful in taking the Golden Week into account. For more insights from a tailored analysis of the Golden Week's impact have a look at [this kernel](https://www.kaggle.com/breakfastpirate/weeks-before-after-golden-week-2016) by [BreakfastPirate](https://www.kaggle.com/breakfastpirate) and the associated [discussion](https://www.kaggle.com/c/recruit-restaurant-visitor-forecasting/discussion/45048) [topics](https://www.kaggle.com/c/recruit-restaurant-visitor-forecasting/discussion/45120).
+
+Since the holiday data is readily available in this competition we only need to rename it according to prophet's liking to include it in our forecast function. Let's modify that function see whether holidays make a difference when predicting for the 2016 Golden Week. The only thing we need to do is to truncate our *air\_visits* data on May 31 2016 in an intermediate step:
+
+```{r}
+plot_prophet_air_id_holiday <- function(air_id, use_hday){
+
+  air_visits_cut <- air_visits %>%
+    filter(visit_date <= ymd("20160531"))
+
+  hday <- holidays %>%
+    filter(holiday_flg == TRUE) %>%
+    mutate(holiday = "holiday") %>%
+    select(ds = date, holiday)
+  
+  pred_len <- test %>%
+    separate(id, c("air", "store_id", "date"), sep = "_") %>%
+    distinct(date) %>%
+    nrow()
+
+  max_date <- max(air_visits_cut$visit_date)
+  split_date <- max_date - pred_len
+
+  all_visits <- tibble(visit_date = seq(min(air_visits_cut$visit_date), max(air_visits_cut$visit_date), 1))
+
+  foo <- air_visits_cut %>%
+    filter(air_store_id == air_id)
+
+  visits <- foo %>%
+    right_join(all_visits, by = "visit_date") %>%
+    mutate(visitors = log1p(visitors)) %>%
+    rownames_to_column() %>%
+    select(y = visitors,
+          ds = visit_date)
+
+  visits_train <- visits %>% filter(ds <= split_date)
+  visits_valid <- visits %>% filter(ds > split_date)
+
+  if (use_hday == TRUE){
+    proph <- prophet(visits_train,
+                     changepoint.prior.scale=0.5,
+                     yearly.seasonality=FALSE,
+                     holidays = hday)
+    ptitle = "Prophet (w/ holidays) for "
+  } else {
+     proph <- prophet(visits_train,
+                     changepoint.prior.scale=0.5,
+                     yearly.seasonality=FALSE)
+    ptitle = "Prophet for "
+  }
+
+  future <- make_future_dataframe(proph, periods = pred_len)
+  fcast <- predict(proph, future)
+
+  p <- fcast %>%
+    as.tibble() %>%
+    mutate(ds = date(ds)) %>%
+    ggplot(aes(ds, yhat)) +
+    geom_ribbon(aes(x = ds, ymin = yhat_lower, ymax = yhat_upper), fill = "light blue") +
+    geom_line(colour = "blue") +
+    geom_line(data = visits_train, aes(ds, y), colour = "black") +
+    geom_line(data = visits_valid, aes(ds, y), colour = "grey50") +
+    labs(title = str_c(ptitle, air_id))
+
+  return(p)
+}  
+```
+
+And then we take a well behaved time series and compare the predictions with and without holidays:
+
+```{r results="hide", fig.align = 'default', warning = FALSE, fig.cap ="Fig. 36", out.width="100%"}
+
+p1 <- plot_prophet_air_id_holiday("air_5c817ef28f236bdf", TRUE)
+p2 <- plot_prophet_air_id_holiday("air_5c817ef28f236bdf", FALSE)
+layout <- matrix(c(1,2),2,1,byrow=TRUE)
+multiplot(p1, p2, layout=layout)
+```
+
+
+We find:
+
+- There is a subtle improvement in fitting the Golden Week *visitors* when including holidays. The performance of this component might improve if there are more holidays included in the *training* set; but I think it's difficult to validate this.
+
+## Holt-Winters
+
+A more traditional time series filtering and forecasting is the *Holt-Winters* algorithm, as implemented in the [`stats` package](https://stat.ethz.ch/R-manual/R-devel/library/stats/html/HoltWinters.html). This is an exponential smoothing method which uses moving averages to take into account the presence of a trend in the data. Here we define a default seasonal model in a fitting and plotting function:
+
+```{r}
+plot_hw_air_id <- function(air_id){
+
+  pred_len <- test %>%
+    separate(id, c("air", "store_id", "date"), sep = "_") %>%
+    distinct(date) %>%
+    nrow()
+
+  max_date <- max(air_visits$visit_date)
+  split_date <- max_date - pred_len
+  all_visits <- tibble(visit_date = seq(min(air_visits$visit_date), max(air_visits$visit_date), 1))
+
+  foo <- air_visits %>%
+    filter(air_store_id == air_id)
+
+  visits <- foo %>%
+    right_join(all_visits, by = "visit_date") %>%
+    mutate(visitors = log1p(visitors)) %>%
+    replace_na(list(visitors = median(log1p(foo$visitors)))) %>%
+    rownames_to_column()
+
+  visits_train <- visits %>% filter(visit_date <= split_date)
+  visits_valid <- visits %>% filter(visit_date > split_date)
+
+  hw.fit <- HoltWinters(tsclean(ts(visits_train$visitors, frequency = 7)))
+
+  hw_visits <- predict(hw.fit, n.ahead = pred_len, prediction.interval = T, level = 0.95) %>%
+    as.tibble() %>%
+    bind_cols(visits_valid)
+  
+  visits_train %>%
+    ggplot(aes(visit_date, visitors)) +
+    geom_line() +
+    geom_ribbon(data = hw_visits, aes(x = visit_date, ymin = lwr, ymax = upr), fill = "light blue") +
+    geom_line(data = hw_visits, aes(visit_date, visitors), color = "grey60") +
+    geom_line(data = hw_visits, aes(visit_date, fit), color = "blue") +
+    geom_line(data = hw_visits, aes(visit_date, fit), color = "blue") +
+    labs(x = "Time [weeks]", y = "log1p visitors vs predictions") +
+    ggtitle("HoltWinters")
+}
+```
+
+We then apply this function to our example time series:
+
+```{r results="hide", fig.align = 'default', warning = FALSE, fig.cap ="Fig. 37", out.width="100%"}
+
+plot_hw_air_id("air_ba937bf13d40fb24")
+
+```
+
+And also plot the same predictions as for *prophet* above:
+
+```{r fig.align = 'default', warning = FALSE, fig.cap ="Fig. 38", out.width="100%"}
+
+p1 <- plot_hw_air_id("air_f3f9824b7d70c3cf")
+p2 <- plot_hw_air_id("air_8e4360a64dbd4c50")
+p3 <- plot_hw_air_id("air_1c0b150f9e696a5f")
+p4 <- plot_hw_air_id("air_820d1919cbecaa0a")
+
+layout <- matrix(c(1,2,3,4),2,2,byrow=TRUE)
+multiplot(p1, p2, p3, p4, layout=layout)
+```
+
+We find:
+
+- While the algorithm performs reasonably well with sufficient data given, similar to `auto.arima` it breaks down for special cases of missing data. We might get a better performance by discarding the missing values instead of replacing them with the median. However, the first impression looks less promising than the `prophet` approach.
+
+- Feel free to fork this kernel and experiment with modified additive and exponential models to tweak the performance of the Holt-Winters method.
+
+
+## timetk
+
+The [timetk package](https://cran.r-project.org/web/packages/timetk/index.html) is a recently released tool kit for time series analysis. It integrates well into the tidyverse ecosystem and is specifically designed to work with the tidy "tibble" data frames. Here we briefly describe the `timetk` approach and how we can apply it to our data.
+
+First, we will create the train and validation data frames in the same way as for the other prediction tools:
+
+```{r message=FALSE, error=FALSE}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
