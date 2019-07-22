@@ -24,5 +24,5 @@ https://towardsdatascience.com/my-secret-sauce-to-be-in-top-2-of-a-kaggle-compet
 https://speakerdeck.com/smly/detafen-xi-kontesutofalse-sheng-zhe-jie-da-karaxue-bu  
 
 ### Blog posts
-**Table data compe tips: https://naotaka1128.hatenadiary.jp/entry/kaggle-compe-tips **  
+**Table data compe tips: https://naotaka1128.hatenadiary.jp/entry/kaggle-compe-tips**  
 Tutorial material by curry: https://note.mu/currypurin/n/nf390914c721e   
