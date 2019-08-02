@@ -26,3 +26,4 @@ https://speakerdeck.com/smly/detafen-xi-kontesutofalse-sheng-zhe-jie-da-karaxue-
 ### Blog posts
 **Table data compe tips: https://naotaka1128.hatenadiary.jp/entry/kaggle-compe-tips**  
 Tutorial material by curry: https://note.mu/currypurin/n/nf390914c721e   
+
