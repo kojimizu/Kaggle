@@ -1,4 +1,4 @@
-# Laggle
+# Kaggle
 
 ## Exercise
 ### 1: NYC Taxi Distance Prediction by XGBoost(-2018/10/01)  
